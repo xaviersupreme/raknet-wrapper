@@ -193,7 +193,7 @@ local conn = raknet.Capture:ConnectOpcode(0x83, function(packet)
 end)
 ```
 
-One-shot listener:
+One time listener:
 
 ```luau
 raknet.Capture:Once(function(packet)
