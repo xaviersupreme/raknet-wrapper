@@ -1,4 +1,4 @@
-# raknet wrapper
+# raknet wrapper for potassium
 
 ## added funcs:
 
@@ -295,5 +295,4 @@ print(raknet.getlasterror())
 
 ## Note
 
-- This was made for potassium!!
 - markdown template made by @dodger1911#0
