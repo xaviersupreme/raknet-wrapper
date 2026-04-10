@@ -33,6 +33,8 @@ local hookRegistered = false
 local captureCallbacks: { CaptureCallback } = {}
 local pendingManualSends: { [string]: number } = {}
 local transportMode = rawget(nativeRakNet, "__transportMode") == "dryrun" and "dryrun" or "live"
+local recentPackets: { PacketSnapshot } = {}
+local recentPacketLimit = 200
 
 local stats = {
     sent = 0,
@@ -60,8 +62,27 @@ local function copyBytes(bytes: PacketData): PacketData
     return out
 end
 
+local function clonePacketSnapshot(packet: PacketSnapshot | { id: number?, data: PacketData?, size: number?, priority: number?, reliability: number?, orderingChannel: number?, source: string?, blocked: boolean? }): PacketSnapshot
+    local data = copyBytes(packet.data or {})
+    return {
+        id = packet.id or data[1] or 0,
+        data = data,
+        size = packet.size or #data,
+        priority = packet.priority or 0,
+        reliability = packet.reliability or 0,
+        orderingChannel = packet.orderingChannel or 0,
+        source = packet.source or "unknown",
+        blocked = packet.blocked == true,
+    }
+end
+
 local function compactHex(value: string): string
     return value:gsub("%s+", "")
+end
+
+local function isHexString(value: string): boolean
+    local compact = compactHex(value)
+    return compact ~= "" and compact:match("^[%x]+$") ~= nil and #compact % 2 == 0
 end
 
 local function ensureOpcodeStat(id: number)
@@ -99,8 +120,26 @@ local function matchesFilter(bytes: PacketData): boolean
         return false
     end
 
-    for i, byte in ipairs(filterBytes) do
-        if bytes[i] ~= byte then
+    for i = 1, #filterBytes do
+        if bytes[i] ~= filterBytes[i] then
+            return false
+        end
+    end
+
+    return true
+end
+
+local function matchesPrefix(bytes: PacketData, prefix: PacketData): boolean
+    if #prefix == 0 then
+        return true
+    end
+
+    if #bytes < #prefix then
+        return false
+    end
+
+    for i = 1, #prefix do
+        if bytes[i] ~= prefix[i] then
             return false
         end
     end
@@ -124,13 +163,18 @@ end
 local function recordCapture(packet: PacketSnapshot)
     stats.captured += 1
     ensureOpcodeStat(packet.id).captured += 1
+
+    recentPackets[#recentPackets + 1] = clonePacketSnapshot(packet)
+    if #recentPackets > recentPacketLimit then
+        table.remove(recentPackets, 1)
+    end
 end
 
 local function fireCapture(packet: PacketSnapshot)
     recordCapture(packet)
 
-    for _, fn in ipairs(captureCallbacks) do
-        task.spawn(fn, packet)
+    for i = 1, #captureCallbacks do
+        task.spawn(captureCallbacks[i], packet)
     end
 end
 
@@ -148,8 +192,8 @@ function Capture:Connect(fn: CaptureCallback)
 
             disconnected = true
 
-            for i, callback in ipairs(captureCallbacks) do
-                if callback == fn then
+            for i = 1, #captureCallbacks do
+                if captureCallbacks[i] == fn then
                     table.remove(captureCallbacks, i)
                     break
                 end
@@ -181,6 +225,29 @@ function Capture:ConnectOpcode(id: number, fn: CaptureCallback)
     end)
 end
 
+function Capture:ConnectMatch(predicate, fn: CaptureCallback)
+    assert(type(predicate) == "function", "Capture:ConnectMatch expects a predicate function")
+    assert(type(fn) == "function", "Capture:ConnectMatch expects a callback function")
+
+    return self:Connect(function(packet)
+        if predicate(packet) then
+            fn(packet)
+        end
+    end)
+end
+
+function Capture:ConnectPrefix(prefix: PacketData, fn: CaptureCallback)
+    assert(type(prefix) == "table", "Capture:ConnectPrefix expects a byte table prefix")
+    assert(type(fn) == "function", "Capture:ConnectPrefix expects a callback function")
+
+    local expectedPrefix = copyBytes(prefix)
+    return self:Connect(function(packet)
+        if matchesPrefix(packet.data, expectedPrefix) then
+            fn(packet)
+        end
+    end)
+end
+
 local function normalizeBytes(value: string | PacketData): PacketData
     if type(value) == "table" then
         return copyBytes(value)
@@ -189,7 +256,7 @@ local function normalizeBytes(value: string | PacketData): PacketData
     assert(type(value) == "string", "expected string or byte table")
 
     local compact = compactHex(value)
-    if compact ~= "" and compact:match("^[%x]+$") and #compact % 2 == 0 then
+    if isHexString(value) then
         local bytes = table.create(#compact // 2)
         for i = 1, #compact, 2 do
             bytes[#bytes + 1] = tonumber(compact:sub(i, i + 1), 16)
@@ -242,7 +309,7 @@ local function ensureHook()
     hookRegistered = true
 end
 
-local function sendBytes(bytes: PacketData, priority: number, reliability: number, orderingChannel: number): (boolean, string?)
+local function sendBytes(bytes: PacketData, priority: number, reliability: number, orderingChannel: number, nativeValue: PacketData | string?): (boolean, string?)
     local id = bytes[1] or 0
 
     if matchesFilter(bytes) then
@@ -271,7 +338,12 @@ local function sendBytes(bytes: PacketData, priority: number, reliability: numbe
     pendingManualSends[key] = (pendingManualSends[key] or 0) + 1
     stats.liveSends += 1
 
-    local ok, err = pcall(nativeSend, copyBytes(bytes), priority, reliability, orderingChannel)
+    local payload = nativeValue
+    if payload == nil then
+        payload = copyBytes(bytes)
+    end
+
+    local ok, err = pcall(nativeSend, payload, priority, reliability, orderingChannel)
     if not ok then
         releasePendingKey(key)
         stats.sendErrors += 1
@@ -282,12 +354,10 @@ local function sendBytes(bytes: PacketData, priority: number, reliability: numbe
     return true
 end
 
-if game.Players.LocalPlayer.Name == game.Players.LocalPlayer.Name and "You Love Femboys" then
-    setreadonly(raknet, false)
-end
-
 function raknet.sendraw(value: string | PacketData, priority: number?, reliability: number?, orderingChannel: number?): (boolean, string?)
-    return sendBytes(normalizeBytes(value), priority or 0, reliability or 0, orderingChannel or 0)
+    local bytes = normalizeBytes(value)
+    local nativeValue = type(value) == "string" and not isHexString(value) and value or copyBytes(bytes)
+    return sendBytes(bytes, priority or 0, reliability or 0, orderingChannel or 0, nativeValue)
 end
 
 function raknet.sendhex(value: string, priority: number?, reliability: number?, orderingChannel: number?): (boolean, string?)
@@ -296,34 +366,50 @@ end
 
 function raknet.sendstring(value: string, priority: number?, reliability: number?, orderingChannel: number?): (boolean, string?)
     assert(type(value) == "string", "sendstring expects a string")
-    return raknet.sendraw(value, priority, reliability, orderingChannel)
+    return sendBytes(normalizeBytes(value), priority or 0, reliability or 0, orderingChannel or 0, value)
 end
 
 function raknet.sendopcode(id: number, payload: PacketData?, priority: number?, reliability: number?, orderingChannel: number?): (boolean, string?)
     assert(type(id) == "number", "sendopcode expects a numeric id")
 
     local bytes = { id }
-    for _, byte in ipairs(payload or {}) do
-        bytes[#bytes + 1] = byte
+    local payloadBytes = payload or {}
+    for i = 1, #payloadBytes do
+        bytes[#bytes + 1] = payloadBytes[i]
     end
 
     return sendBytes(bytes, priority or 0, reliability or 0, orderingChannel or 0)
 end
 
-function raknet.sendphysics(cf: CFrame, priority: number?, reliability: number?, orderingChannel: number?): (boolean, string?)
-    local position = cf.Position
-    local packed = string.pack(">fff", position.X, position.Y, position.Z)
-    local bytes = { 0x85 }
-
-    for i = 1, #packed do
-        bytes[#bytes + 1] = string.byte(packed, i)
-    end
-
-    return sendBytes(bytes, priority or 0, reliability or 0, orderingChannel or 0)
+function raknet.clonepacket(packet): PacketSnapshot
+    assert(type(packet) == "table", "clonepacket expects a packet table")
+    return clonePacketSnapshot(packet)
 end
 
-function raknet.sendposition(value: Vector3 | CFrame, priority: number?, reliability: number?, orderingChannel: number?): (boolean, string?)
-    return raknet.sendphysics(typeof(value) == "CFrame" and value or CFrame.new(value), priority, reliability, orderingChannel)
+function raknet.matchprefix(bytes: PacketData | string, prefix: PacketData | string): boolean
+    local normalizedBytes = type(bytes) == "string" and normalizeBytes(bytes) or copyBytes(bytes)
+    local normalizedPrefix = type(prefix) == "string" and normalizeBytes(prefix) or copyBytes(prefix)
+    return matchesPrefix(normalizedBytes, normalizedPrefix)
+end
+
+function raknet.resend(packet, priority: number?, reliability: number?, orderingChannel: number?): (boolean, string?)
+    assert(type(packet) == "table", "resend expects a packet table")
+    return raknet.sendraw(
+        copyBytes(packet.data or {}),
+        priority ~= nil and priority or packet.priority or 0,
+        reliability ~= nil and reliability or packet.reliability or 0,
+        orderingChannel ~= nil and orderingChannel or packet.orderingChannel or 0
+    )
+end
+
+function raknet.sendlike(packet, newBytes: PacketData | string): (boolean, string?)
+    assert(type(packet) == "table", "sendlike expects a packet table")
+    return raknet.sendraw(
+        newBytes,
+        packet.priority or 0,
+        packet.reliability or 0,
+        packet.orderingChannel or 0
+    )
 end
 
 function raknet.setmode(mode: string)
@@ -368,6 +454,27 @@ end
 
 function raknet.blockopcode(id: number)
     raknet.setfilter({ id })
+end
+
+function raknet.clearrecent()
+    recentPackets = {}
+end
+
+function raknet.recent(limit: number?, source: string?): { PacketSnapshot }
+    local maxCount = math.max(0, limit or #recentPackets)
+    local out = {}
+
+    for i = #recentPackets, 1, -1 do
+        local packet = recentPackets[i]
+        if source == nil or packet.source == source then
+            out[#out + 1] = clonePacketSnapshot(packet)
+            if #out >= maxCount then
+                break
+            end
+        end
+    end
+
+    return out
 end
 
 function raknet.tohex(bytes: PacketData | string, limit: number?): string
@@ -417,6 +524,30 @@ function raknet.packettostring(packet: PacketSnapshot | { id: number?, data: Pac
     )
 end
 
+function raknet.hexdiff(left: PacketData | string, right: PacketData | string): string
+    local a = type(left) == "string" and normalizeBytes(left) or copyBytes(left)
+    local b = type(right) == "string" and normalizeBytes(right) or copyBytes(right)
+    local maxLen = math.max(#a, #b)
+    local lines = {}
+
+    for i = 1, maxLen do
+        local av = a[i]
+        local bv = b[i]
+        if av == bv then
+            lines[#lines + 1] = string.format("%02d: %s", i, av ~= nil and string.format("%02X", av) or "--")
+        else
+            lines[#lines + 1] = string.format(
+                "%02d: %s -> %s",
+                i,
+                av ~= nil and string.format("%02X", av) or "--",
+                bv ~= nil and string.format("%02X", bv) or "--"
+            )
+        end
+    end
+
+    return table.concat(lines, "\n")
+end
+
 function raknet.waitfor(id: number?, timeout: number?): PacketSnapshot?
     ensureHook()
 
@@ -450,6 +581,32 @@ function raknet.captureonce(id: number?, timeout: number?): PacketSnapshot?
     end
 
     return packet
+end
+
+function raknet.countopcodes(seconds: number?, source: string?): { [number]: number }
+    local duration = math.max(0.05, seconds or 3)
+    local previous = capturing
+    local counts = {}
+    local connection
+
+    raknet.startcapture()
+    connection = raknet.Capture:Connect(function(packet)
+        if source == nil or packet.source == source then
+            counts[packet.id] = (counts[packet.id] or 0) + 1
+        end
+    end)
+
+    local deadline = os.clock() + duration
+    while os.clock() < deadline do
+        task.wait()
+    end
+
+    connection:Disconnect()
+    if not previous then
+        raknet.stopcapture()
+    end
+
+    return counts
 end
 
 function raknet.resetstats()
