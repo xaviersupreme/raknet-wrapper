@@ -64,7 +64,7 @@
 `raknet.resend(packet, priority?, reliability?, orderingChannel?) -> (boolean, string?)`
 
 - `packet`: `{ data: {number}, priority: number?, reliability: number?, orderingChannel: number? }`
-- re-sends packet data, using packet transport values unless you override them
+- resends packet data, using packet transport values unless you override them
 
 `raknet.sendlike(packet, newBytes) -> (boolean, string?)`
 
