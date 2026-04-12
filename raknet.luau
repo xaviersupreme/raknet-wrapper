@@ -4,7 +4,7 @@ assert(type(nativeRakNet.send) == "function", "raknet.send is missing")
 assert(type(nativeRakNet.add_send_hook) == "function", "raknet.add_send_hook is missing")
 assert(type(nativeRakNet.remove_send_hook) == "function", "raknet.remove_send_hook is missing")
 
-setreadonly(raknet, false)
+setreadonly(nativeRakNet, false)
 
 local nativeSend = nativeRakNet.send
 local nativeAddSendHook = nativeRakNet.add_send_hook
