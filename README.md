@@ -27,6 +27,7 @@
 - `raknet.hexdiff(...)`
 - `raknet.packettostring(...)`
 - `raknet.countopcodes(...)`
+- `raknet.packetrate(...)`
 - `raknet.stats()`
 - `raknet.resetstats()`
 
@@ -194,6 +195,13 @@ Returns a table containing:
 
 - `seconds`: `number?`
 - `source`: `string?`
+
+`raknet.packetrate(seconds?, source?) -> number`
+
+- `seconds`: `number?` — observation window length (default 3)
+- `source`: `string?` — optional filter: `"hook"`, `"manual"`, `"manual-dryrun"`
+- returns total packets per second seen during the window
+- returns `0` if no packets were captured
 
 ## Basic examples
 
@@ -392,6 +400,45 @@ Last native send error:
 ```luau
 print(raknet.getlasterror())
 ```
+
+Get packets per second over a 5-second window:
+
+```luau
+local pps = raknet.packetrate(5)
+print(string.format("%.1f packets/sec", pps))
+```
+
+Measure rate for hook-sourced packets only:
+
+```luau
+local pps = raknet.packetrate(3, "hook")
+print(string.format("%.1f hook packets/sec", pps))
+```
+
+## Bug fixes
+
+ `normalizeBytes` - hex branch checked wrong variable
+
+`isHexString` was called on the original `value` instead of the already stripped `compact`.
+Inputs like `"AB CD"` (spaced hex) would fall through to the raw-string branch and encode
+space characters as `0x20` instead of being decoded as hex bytes.
+
+ `waitfor` - capture was never enabled
+
+`waitfor` registered a capture connection but never called `startcapture()`,
+so `fireCapture` was gated out and the function would always hang until timeout.
+Now saves and restores the previous capture state around the wait.
+
+ `sendBytes` - `stats.sent` counted dry-run sends
+
+`stats.sent` and `stats.manualPackets` were incremented before the dryrun early-return,
+so every dryrun send was double counted in both `stats.sent` and `stats.dryrunSends`.
+They are now only incremented on the live path.
+
+ `clearfilter` - unnecessary table allocation
+
+`clearfilter()` called `setfilter({})` instead of `setfilter(nil)`,
+causing `setfilter` to copy an empty table rather than using the nil handled path.
 
 ## Note
 
