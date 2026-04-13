@@ -258,7 +258,7 @@ local function normalizeBytes(value: string | PacketData): PacketData
     assert(type(value) == "string", "expected string or byte table")
 
     local compact = compactHex(value)
-    if isHexString(value) then
+    if isHexString(compact) then
         local bytes = table.create(#compact // 2)
         for i = 1, #compact, 2 do
             bytes[#bytes + 1] = tonumber(compact:sub(i, i + 1), 16)
@@ -320,11 +320,6 @@ local function sendBytes(bytes: PacketData, priority: number, reliability: numbe
         return false, "blocked by filter"
     end
 
-    stats.sent += 1
-    stats.manualPackets += 1
-    ensureOpcodeStat(id).sent += 1
-    stats.lastSendError = nil
-
     local source = transportMode == "dryrun" and "manual-dryrun" or "manual"
 
     if capturing then
@@ -333,8 +328,14 @@ local function sendBytes(bytes: PacketData, priority: number, reliability: numbe
 
     if transportMode == "dryrun" then
         stats.dryrunSends += 1
+        ensureOpcodeStat(id).sent += 1
         return true
     end
+
+    stats.sent += 1
+    stats.manualPackets += 1
+    ensureOpcodeStat(id).sent += 1
+    stats.lastSendError = nil
 
     local key = bytesKey(bytes, priority, reliability, orderingChannel)
     pendingManualSends[key] = (pendingManualSends[key] or 0) + 1
@@ -447,7 +448,7 @@ function raknet.setfilter(bytes: PacketData?)
 end
 
 function raknet.clearfilter()
-    raknet.setfilter({})
+    raknet.setfilter(nil)
 end
 
 function raknet.getfilter(): PacketData
@@ -553,6 +554,9 @@ end
 function raknet.waitfor(id: number?, timeout: number?): PacketSnapshot?
     ensureHook()
 
+    local previousCapturing = capturing
+    capturing = true
+
     local deadline = os.clock() + (timeout or 5)
     local found: PacketSnapshot? = nil
     local connection
@@ -569,6 +573,9 @@ function raknet.waitfor(id: number?, timeout: number?): PacketSnapshot?
     end
 
     connection:Disconnect()
+    if not previousCapturing then
+        capturing = false
+    end
     return found
 end
 
@@ -609,6 +616,18 @@ function raknet.countopcodes(seconds: number?, source: string?): { [number]: num
     end
 
     return counts
+end
+
+function raknet.packetrate(seconds: number?, source: string?): number
+    local duration = math.max(0.05, seconds or 3)
+    local counts = raknet.countopcodes(duration, source)
+
+    local total = 0
+    for _, count in pairs(counts) do
+        total += count
+    end
+
+    return total / duration
 end
 
 function raknet.resetstats()
