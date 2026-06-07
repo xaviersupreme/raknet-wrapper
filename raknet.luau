@@ -411,6 +411,14 @@ local function applyPipes(packet: PacketSnapshot): (PacketSnapshot?, string?)
     return current, nil
 end
 
+local function samePacketShape(packet: PacketSnapshot, bytes: PacketData, priority: number, reliability: number, orderingChannel: number): boolean
+    if packet.priority ~= priority or packet.reliability ~= reliability or packet.orderingChannel ~= orderingChannel then
+        return false
+    end
+
+    return matchesPrefix(packet.data, bytes) and #packet.data == #bytes
+end
+
 local function ensureHook()
     if hookRegistered then
         return
@@ -439,8 +447,46 @@ local function ensureHook()
             return
         end
 
+        local snapshot = makePacketSnapshot(bytes, packet.Priority, packet.Reliability, packet.OrderingChannel, "hook", false)
+        local transformed = applyPipes(snapshot)
+
+        if not transformed then
+            stats.blocked += 1
+            ensureOpcodeStat(bytes[1] or 0).blocked += 1
+
+            if capturing then
+                fireCapture(makePacketSnapshot(bytes, packet.Priority, packet.Reliability, packet.OrderingChannel, "hook", true))
+            end
+
+            packet:Block()
+            return
+        end
+
+        if not samePacketShape(transformed, bytes, packet.Priority, packet.Reliability, packet.OrderingChannel) then
+            packet:Block()
+
+            local newKey = bytesKey(transformed.data, transformed.priority, transformed.reliability, transformed.orderingChannel)
+            pendingManualSends[newKey] = (pendingManualSends[newKey] or 0) + 1
+
+            local ok, err = pcall(nativeSend, copyBytes(transformed.data), transformed.priority, transformed.reliability, transformed.orderingChannel)
+            if not ok then
+                releasePendingKey(newKey)
+                stats.sendErrors += 1
+                stats.lastSendError = tostring(err)
+                return
+            end
+
+            stats.liveSends += 1
+
+            if capturing then
+                fireCapture(makePacketSnapshot(transformed.data, transformed.priority, transformed.reliability, transformed.orderingChannel, "hook", false))
+            end
+
+            return
+        end
+
         if capturing then
-            fireCapture(makePacketSnapshot(bytes, packet.Priority, packet.Reliability, packet.OrderingChannel, "hook", false))
+            fireCapture(snapshot)
         end
     end
 
@@ -630,6 +676,7 @@ function raknet.pipe(name: string, fn: PipeCallback)
     end
 
     pipes[name] = fn
+    ensureHook()
 
     local removed = false
     return {

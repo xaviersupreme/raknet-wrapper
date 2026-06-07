@@ -34,7 +34,7 @@
 
 **pipes**
 
-named packet edits/blockers that run before manual sends:
+named packet edits/blockers that run on outgoing packets:
 
 ```luau
 raknet.pipe("no-83", function(packet)
@@ -294,7 +294,7 @@ raknet.teardown()
 
 - `name`: `string`
 - `fn`: `(packet) -> packet? | false | nil`
-- return `false` to block a manual send
+- return `false` to block the packet
 - return a packet table to replace it
 - return `nil` to leave it unchanged
 
@@ -558,7 +558,7 @@ important: filtering is prefix based.
 
 ## Pipes
 
-Block a packet before a manual send:
+Block a packet before it leaves:
 
 ```luau
 raknet.pipe("no-83", function(packet)
@@ -568,7 +568,7 @@ raknet.pipe("no-83", function(packet)
 end)
 ```
 
-Patch a manual send:
+Patch a packet before it leaves:
 
 ```luau
 raknet.pipe("edit", function(packet)
@@ -602,6 +602,7 @@ Possible outcomes:
 
 - `true` when the packet was accepted by the wrapper
 - `false, "blocked by filter"` when the local filter blocked it
+- `false, "blocked by pipe: <name>"` when a pipe blocked a wrapper send
 - `false, <executor error>` when native live send failed
 
 ## Formatting helpers
