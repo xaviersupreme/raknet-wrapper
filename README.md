@@ -30,12 +30,113 @@
   </a>
 </p>
 
+## new stuff:
+
+**pipes**
+
+named packet edits/blockers that run before manual sends:
+
+```luau
+raknet.pipe("no-83", function(packet)
+    if packet.id == 0x83 then
+        return false
+    end
+end)
+```
+
+edit a packet:
+
+```luau
+raknet.pipe("patch-83", function(packet)
+    if packet.id == 0x83 then
+        return raknet.patch(packet, {
+            [2] = 0x07,
+            append = "FF",
+        })
+    end
+end)
+```
+
+remove pipes:
+
+```luau
+raknet.unpipe("patch-83")
+raknet.clearpipes()
+```
+
+**rules**
+
+same idea as pipes but less typing:
+
+```luau
+raknet.rules("basic", {
+    { opcode = 0x83, action = "log" },
+    { prefix = "84 00", action = "block" },
+    { opcode = 0x85, patch = { [2] = 0x01 } },
+})
+```
+
+**watch / await**
+
+named capture listeners:
+
+```luau
+raknet.watch("movement", { opcode = 0x83 }, function(packet)
+    print(raknet.tohex(packet.data))
+end)
+
+raknet.unwatch("movement")
+```
+
+wait for an opcode, prefix, matcher table, or custom function:
+
+```luau
+local packet = raknet.await({ prefix = "83 07" }, 5)
+```
+
+**packet tools**
+
+quick inspect / patch / compare helpers:
+
+```luau
+local info = raknet.inspect("83 41 42")
+print(info.hex, info.ascii)
+
+local changed = raknet.patch("83 00 01", {
+    [2] = 0x07,
+    append = "FF",
+})
+
+local diff = raknet.diffpacket("83 00 01", "83 07 01")
+print(diff.changed)
+```
+
+**record / replay**
+
+record outgoing packets and send them back later:
+
+```luau
+local rec = raknet.record("test", "manual")
+
+raknet.sendhex("83 00 01")
+
+local packets = rec:Stop()
+raknet.replay(packets, 0.1)
+```
+
+**cleanup**
+
+```luau
+raknet.teardown()
+```
+
 ## added funcs:
 
 - `raknet.sendraw(...)`
 - `raknet.sendhex(...)`
 - `raknet.sendstring(...)`
 - `raknet.sendopcode(...)`
+- `raknet.sendmany(...)`
 - `raknet.resend(...)`
 - `raknet.sendlike(...)`
 - `raknet.startcapture()`
@@ -43,8 +144,19 @@
 - `raknet.setfilter(...)`
 - `raknet.clearfilter()`
 - `raknet.blockopcode(...)`
+- `raknet.pipe(...)`
+- `raknet.unpipe(...)`
+- `raknet.clearpipes()`
+- `raknet.listpipes()`
+- `raknet.rules(...)`
+- `raknet.watch(...)`
+- `raknet.unwatch(...)`
+- `raknet.clearwatchers()`
 - `raknet.clearrecent()`
 - `raknet.recent(...)`
+- `raknet.setrecentlimit(...)`
+- `raknet.getrecentlimit()`
+- `raknet.findrecent(...)`
 - `raknet.clonepacket(...)`
 - `raknet.matchprefix(...)`
 - `raknet.Capture:Connect(...)`
@@ -56,10 +168,18 @@
 - `raknet.fromhex(...)`
 - `raknet.hexdiff(...)`
 - `raknet.packettostring(...)`
+- `raknet.inspect(...)`
+- `raknet.diffpacket(...)`
+- `raknet.patch(...)`
+- `raknet.await(...)`
+- `raknet.record(...)`
+- `raknet.stoprecord(...)`
+- `raknet.replay(...)`
 - `raknet.countopcodes(...)`
 - `raknet.packetrate(...)`
 - `raknet.stats()`
 - `raknet.resetstats()`
+- `raknet.teardown()`
 
 ## API
 
@@ -89,8 +209,13 @@
 `raknet.sendopcode(id, payload?, priority?, reliability?, orderingChannel?) -> (boolean, string?)`
 
 - `id`: `number`
-- `payload`: `{number}?`
+- `payload`: `{number}? | string?`
 - same return values as `sendraw`
+
+`raknet.sendmany(packets) -> { { ok: boolean, err: string? } }`
+
+- `packets`: `{ { bytes: {number} | string, priority: number?, reliability: number?, orderingChannel: number? } }`
+- sends each packet in order
 
 `raknet.resend(packet, priority?, reliability?, orderingChannel?) -> (boolean, string?)`
 
@@ -126,7 +251,7 @@
 
 `raknet.Capture:ConnectPrefix(prefix, fn) -> { Disconnect: (self) -> () }`
 
-- `prefix`: `{number}`
+- `prefix`: `{number} | string`
 - `fn`: `(packet) -> ()`
 
 `raknet.Capture:ConnectMatch(predicate, fn) -> { Disconnect: (self) -> () }`
@@ -138,6 +263,11 @@
 
 - `id`: `number?`
 - `timeout`: `number?`
+
+`raknet.await(matcher?, timeout?) -> packet?`
+
+- `matcher`: `number | string | {number} | table | function`
+- accepts opcode numbers, byte prefixes, predicate functions, or matcher tables like `{ opcode = 0x83 }`
 
 `raknet.captureonce(id?, timeout?) -> packet?`
 
@@ -158,6 +288,36 @@
 
 - `id`: `number`
 
+### Pipes/watchers
+
+`raknet.pipe(name, fn) -> { Remove: (self) -> () }`
+
+- `name`: `string`
+- `fn`: `(packet) -> packet? | false | nil`
+- return `false` to block a manual send
+- return a packet table to replace it
+- return `nil` to leave it unchanged
+
+`raknet.unpipe(name) -> ()`
+
+`raknet.clearpipes() -> ()`
+
+`raknet.listpipes() -> {string}`
+
+`raknet.rules(name?, rules) -> { Remove: (self) -> () }`
+
+- simple named pipe builder
+- rule actions can be `"block"`, `"log"`, a function, or a `patch` table
+
+`raknet.watch(name, matcher?, fn) -> { Remove: (self) -> (), Disconnect: (self) -> () }`
+
+- named capture listener
+- replaces an older watcher with the same name
+
+`raknet.unwatch(name) -> ()`
+
+`raknet.clearwatchers() -> ()`
+
 ### Replay/history helpers
 
 `raknet.clearrecent() -> ()`
@@ -166,6 +326,17 @@
 
 - `limit`: `number?`
 - `source`: `string?`
+
+`raknet.setrecentlimit(limit) -> ()`
+
+- `limit`: `number`
+
+`raknet.getrecentlimit() -> number`
+
+`raknet.findrecent(matcher?, source?) -> packet?`
+
+- searches newest-first
+- uses the same matcher shapes as `await`
 
 `raknet.clonepacket(packet) -> packet`
 
@@ -199,6 +370,24 @@
 - `packet.source`: `string?`
 - `packet.blocked`: `boolean?`
 
+`raknet.inspect(value, limit?) -> table`
+
+- returns `id`, `size`, `hex`, `ascii`, and transport fields when available
+
+`raknet.diffpacket(left, right) -> table`
+
+- returns changed byte indexes and size/opcode info
+
+`raknet.patch(value, edits) -> {number} | packet`
+
+- supports numeric byte edits plus `prepend`, `append`, `insert`, `remove`, and `truncate`
+
+`raknet.record(name?, source?) -> { Stop: (self) -> {packet} }`
+
+`raknet.stoprecord(name?) -> {packet}`
+
+`raknet.replay(packets, delaySeconds?) -> { { ok: boolean, err: string? } }`
+
 ### Stats helpers
 
 `raknet.stats() -> table`
@@ -211,10 +400,8 @@ Returns a table containing:
 - `hookPackets: number`
 - `manualPackets: number`
 - `liveSends: number`
-- `dryrunSends: number`
 - `sendErrors: number`
 - `lastSendError: string?`
-- `mode: string`
 - `byOpcode: { [number]: { sent: number, blocked: number, captured: number } }`
 
 `raknet.resetstats() -> ()`
@@ -229,9 +416,13 @@ Returns a table containing:
 `raknet.packetrate(seconds?, source?) -> number`
 
 - `seconds`: `number?` — observation window length (default 3)
-- `source`: `string?` — optional filter: `"hook"`, `"manual"`, `"manual-dryrun"`
+- `source`: `string?` — optional filter: `"hook"` or `"manual"`
 - returns total packets per second seen during the window
 - returns `0` if no packets were captured
+
+`raknet.teardown() -> ()`
+
+- removes wrapper hook and clears wrapper state
 
 ## Basic examples
 
@@ -269,6 +460,15 @@ local packet = raknet.captureonce(0x83, 5)
 if packet then
     raknet.sendlike(packet, { 0x83, 0x99, 0x01 })
 end
+```
+
+Send a batch:
+
+```luau
+raknet.sendmany({
+    { bytes = { 0x83, 0x00 } },
+    { bytes = "83 01" },
+})
 ```
 
 ## Capture
@@ -317,6 +517,14 @@ end, function(packet)
 end)
 ```
 
+Named watcher:
+
+```luau
+raknet.watch("data", { opcode = 0x83 }, function(packet)
+    print("watch:", raknet.tohex(packet.data))
+end)
+```
+
 Stop capture:
 
 ```luau
@@ -347,6 +555,40 @@ raknet.clearfilter()
 important: filtering is prefix based.  
 `{ 0x83 }` blocks any packet starting with `0x83`.  
 `{ 0x83, 0x00 }` only blocks packets whose first two bytes are `83 00`.
+
+## Pipes
+
+Block a packet before a manual send:
+
+```luau
+raknet.pipe("no-83", function(packet)
+    if packet.id == 0x83 then
+        return false
+    end
+end)
+```
+
+Patch a manual send:
+
+```luau
+raknet.pipe("edit", function(packet)
+    if packet.id == 0x83 then
+        return raknet.patch(packet, {
+            [2] = 0x07,
+            append = { 0x00 },
+        })
+    end
+end)
+```
+
+Simple rules:
+
+```luau
+raknet.rules("basic", {
+    { opcode = 0x83, action = "log" },
+    { prefix = "84 00", action = "block" },
+})
+```
 
 ## Return values
 
@@ -394,6 +636,29 @@ print(raknet.packettostring({
 }))
 ```
 
+Inspect packet:
+
+```luau
+local info = raknet.inspect({ 0x83, 0x41, 0x42 })
+print(info.hex, info.ascii)
+```
+
+Patch bytes:
+
+```luau
+local bytes = raknet.patch("83 00 01", {
+    [2] = 0x07,
+    append = "FF",
+})
+```
+
+Diff packets:
+
+```luau
+local diff = raknet.diffpacket("83 00 01", "83 07 01")
+print(diff.changed)
+```
+
 ## Stats
 
 Get counters:
@@ -423,6 +688,21 @@ local packets = raknet.recent(10, "manual")
 for i = 1, #packets do
     print(raknet.packettostring(packets[i]))
 end
+```
+
+Find one recent packet:
+
+```luau
+local packet = raknet.findrecent({ opcode = 0x83 }, "manual")
+```
+
+Record and replay:
+
+```luau
+local rec = raknet.record("test", "manual")
+raknet.sendhex("83 00 01")
+local packets = rec:Stop()
+raknet.replay(packets, 0.1)
 ```
 
 Last native send error:
@@ -459,11 +739,10 @@ space characters as `0x20` instead of being decoded as hex bytes.
 so `fireCapture` was gated out and the function would always hang until timeout.
 Now saves and restores the previous capture state around the wait.
 
- `sendBytes` - `stats.sent` counted dry-run sends
+ `sendBytes` - failed sends counted as sent
 
-`stats.sent` and `stats.manualPackets` were incremented before the dryrun early-return,
-so every dryrun send was double counted in both `stats.sent` and `stats.dryrunSends`.
-They are now only incremented on the live path.
+`stats.sent`, `stats.manualPackets`, and `stats.liveSends` are now only incremented
+after the native send succeeds.
 
  `clearfilter` - unnecessary table allocation
 
