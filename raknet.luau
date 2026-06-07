@@ -1,19 +1,19 @@
-local nativeRakNet = getgenv().raknet
-assert(type(nativeRakNet) == "table", "global raknet table is missing")
-assert(type(nativeRakNet.send) == "function", "raknet.send is missing")
-assert(type(nativeRakNet.add_send_hook) == "function", "raknet.add_send_hook is missing")
-assert(type(nativeRakNet.remove_send_hook) == "function", "raknet.remove_send_hook is missing")
+local nativeRaknet = getgenv().raknet
+assert(type(nativeRaknet) == "table", "global raknet table is missing")
+assert(type(nativeRaknet.send) == "function", "raknet.send is missing")
+assert(type(nativeRaknet.add_send_hook) == "function", "raknet.add_send_hook is missing")
+assert(type(nativeRaknet.remove_send_hook) == "function", "raknet.remove_send_hook is missing")
 
-setreadonly(nativeRakNet, false)
+setreadonly(nativeRaknet, false)
 
-local nativeSend = nativeRakNet.send
-local nativeAddSendHook = nativeRakNet.add_send_hook
-local nativeRemoveSendHook = nativeRakNet.remove_send_hook
+local nativeSend = nativeRaknet.send
+local nativeAddSendHook = nativeRaknet.add_send_hook
+local nativeRemoveSendHook = nativeRaknet.remove_send_hook
 
-local previousHook = rawget(nativeRakNet, "__wrapperHook")
+local previousHook = rawget(nativeRaknet, "__wrapperHook")
 if type(previousHook) == "function" then
     pcall(nativeRemoveSendHook, previousHook)
-    rawset(nativeRakNet, "__wrapperHook", nil)
+    rawset(nativeRaknet, "__wrapperHook", nil)
 end
 
 type PacketData = { number }
@@ -60,7 +60,7 @@ local stats = {
 local Capture = {}
 Capture.__index = Capture
 
-local raknet = nativeRakNet
+local raknet = nativeRaknet
 local normalizeBytes
 
 local function copyBytes(bytes: PacketData): PacketData
@@ -411,6 +411,14 @@ local function applyPipes(packet: PacketSnapshot): (PacketSnapshot?, string?)
     return current, nil
 end
 
+local function samePacketShape(packet: PacketSnapshot, bytes: PacketData, priority: number, reliability: number, orderingChannel: number): boolean
+    if packet.priority ~= priority or packet.reliability ~= reliability or packet.orderingChannel ~= orderingChannel then
+        return false
+    end
+
+    return matchesPrefix(packet.data, bytes) and #packet.data == #bytes
+end
+
 local function ensureHook()
     if hookRegistered then
         return
@@ -439,8 +447,46 @@ local function ensureHook()
             return
         end
 
+        local snapshot = makePacketSnapshot(bytes, packet.Priority, packet.Reliability, packet.OrderingChannel, "hook", false)
+        local transformed = applyPipes(snapshot)
+
+        if not transformed then
+            stats.blocked += 1
+            ensureOpcodeStat(bytes[1] or 0).blocked += 1
+
+            if capturing then
+                fireCapture(makePacketSnapshot(bytes, packet.Priority, packet.Reliability, packet.OrderingChannel, "hook", true))
+            end
+
+            packet:Block()
+            return
+        end
+
+        if not samePacketShape(transformed, bytes, packet.Priority, packet.Reliability, packet.OrderingChannel) then
+            packet:Block()
+
+            local newKey = bytesKey(transformed.data, transformed.priority, transformed.reliability, transformed.orderingChannel)
+            pendingManualSends[newKey] = (pendingManualSends[newKey] or 0) + 1
+
+            local ok, err = pcall(nativeSend, copyBytes(transformed.data), transformed.priority, transformed.reliability, transformed.orderingChannel)
+            if not ok then
+                releasePendingKey(newKey)
+                stats.sendErrors += 1
+                stats.lastSendError = tostring(err)
+                return
+            end
+
+            stats.liveSends += 1
+
+            if capturing then
+                fireCapture(makePacketSnapshot(transformed.data, transformed.priority, transformed.reliability, transformed.orderingChannel, "hook", false))
+            end
+
+            return
+        end
+
         if capturing then
-            fireCapture(makePacketSnapshot(bytes, packet.Priority, packet.Reliability, packet.OrderingChannel, "hook", false))
+            fireCapture(snapshot)
         end
     end
 
@@ -630,6 +676,7 @@ function raknet.pipe(name: string, fn: PipeCallback)
     end
 
     pipes[name] = fn
+    ensureHook()
 
     local removed = false
     return {
@@ -1185,10 +1232,10 @@ function raknet.stats()
 end
 
 function raknet.teardown()
-    local hook = rawget(nativeRakNet, "__wrapperHook")
+    local hook = rawget(nativeRaknet, "__wrapperHook")
     if type(hook) == "function" then
         pcall(nativeRemoveSendHook, hook)
-        rawset(nativeRakNet, "__wrapperHook", nil)
+        rawset(nativeRaknet, "__wrapperHook", nil)
     end
 
     hookRegistered = false
